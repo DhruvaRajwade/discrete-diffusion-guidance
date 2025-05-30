@@ -1,0 +1,15 @@
+.idea/
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+.hf_cache
+outputs/
+watch_folder/
+.venv/
+.ruff_cache/
+.python-version
+pyproject.toml
+uv.lock
+requirements.yaml
+.wheels/
+.hf_cache/
