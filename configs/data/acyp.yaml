@@ -1,0 +1,8 @@
+train: acyp
+valid: acyp
+tokenizer_name_or_path: acyp
+cache_dir: /home/dhruva/discrete-diffusion-guidance/.cache
+override_cache: False
+add_special_tokens: True
+wrap: True
+streaming: False

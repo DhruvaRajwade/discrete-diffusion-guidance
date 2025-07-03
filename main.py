@@ -1,4 +1,3 @@
-import json
 import os
 
 import fsspec
@@ -8,8 +7,6 @@ import omegaconf
 import rich.syntax
 import rich.tree
 import torch
-from tqdm import tqdm
-
 import classifier
 import dataloader
 import diffusion
@@ -85,11 +82,20 @@ def _print_batch(train_ds, valid_ds, tokenizer, k=64):
 
 def _train(config, logger, tokenizer, train_classifier=False):
     logger.info("Starting Training.")
+
     wandb_logger = None
-    if config.get("wandb", None) is not None:
-        wandb_logger = L.pytorch.loggers.WandbLogger(
-            config=omegaconf.OmegaConf.to_object(config), **config.wandb
+    tb_logger = None
+    # Initialize Logger
+    if config.eval.use_tensorboard:
+        tb_logger = L.pytorch.loggers.TensorBoardLogger(
+            save_dir=config.checkpointing.save_dir, name="tensorboard_logs"
         )
+
+    else:
+        if config.get("wandb", None) is not None:
+            wandb_logger = L.pytorch.loggers.WandbLogger(
+                config=omegaconf.OmegaConf.to_object(config), **config.wandb
+            )
 
     if (
         config.checkpointing.resume_from_ckpt
@@ -146,62 +152,9 @@ def _train(config, logger, tokenizer, train_classifier=False):
         default_root_dir=os.getcwd(),
         callbacks=callbacks,
         strategy=hydra.utils.instantiate(config.strategy),
-        logger=wandb_logger,
+        logger=wandb_logger if wandb_logger else tb_logger,
     )
     trainer.fit(model, train_ds, valid_ds, ckpt_path=ckpt_path)
-
-
-def _gen_ppl_eval(config, tokenizer):
-    pretrained = _load_from_checkpoint(config=config, tokenizer=tokenizer)
-    pretrained.eval()
-    samples = []
-    for _ in tqdm(
-        range(config.sampling.num_sample_batches), desc="Gen. batches", leave=False
-    ):
-        sample = pretrained.sample()
-        samples.extend(pretrained.tokenizer.batch_decode(sample))
-
-    # Replace CLS token with BOS token (if applicable) and
-    # remove padding and mask tokens
-    tok_bos_token = (
-        tokenizer.bos_token if tokenizer.bos_token is not None else tokenizer.cls_token
-    )
-    samples = [s.replace("[PAD]", "").replace("[MASK]", "").strip() for s in samples]
-    # Add BOS token to the beginning of each sample (if not already present)
-    samples = [
-        s if s.startswith(tok_bos_token) else f"{tok_bos_token} {s}" for s in samples
-    ]
-    del pretrained  # free up space for eval
-    print(f"Generated {len(samples)} samples.")
-
-    generative_ppl = eval_utils.compute_generative_ppl(
-        samples,
-        eval_model_name_or_path=config.eval.generative_ppl_model_name_or_path,
-        gen_ppl_eval_batch_size=8,
-        max_length=config.model.length,
-    )
-    tokens = tokenizer.batch_encode_plus(
-        samples,
-        return_tensors="pt",
-        add_special_tokens=False,
-        max_length=config.model.length,
-        padding="max_length",
-        truncation=True,
-    )["input_ids"]
-    _, counts = torch.unique(torch.tensor(tokens), return_counts=True, sorted=False)
-    entropy = torch.special.entr(counts.float() / counts.sum()).sum().item()
-    with open(config.eval.generated_samples_path, "w") as f:
-        json.dump(
-            {
-                "generative_ppl": generative_ppl,
-                "entropy": entropy,
-                "generated_seqs": samples,
-            },
-            f,
-            indent=4,
-        )  # type: ignore
-    print(f"Entropy: {entropy:0.3f}")
-    print(f"Gen. PPL: {generative_ppl:0.3f}")
 
 
 def _ppl_eval(config, tokenizer):
@@ -228,9 +181,9 @@ def main(config):
     tokenizer = dataloader.get_tokenizer(config)
 
     if config.mode == "gen_ppl_eval":
-        _gen_ppl_eval(config, tokenizer)
+        pass
     elif config.mode == "ppl_eval":
-        _ppl_eval(config, tokenizer)
+        pass
     elif "train" in config.mode:
         _train(config, logger, tokenizer, train_classifier="classifier" in config.mode)
     else:

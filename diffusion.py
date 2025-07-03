@@ -865,6 +865,17 @@ class Diffusion(L.LightningModule):
                                 columns=["Generated Samples"],
                                 data=[decoded_samples],
                             )
+
+                        elif hasattr(self.trainer.logger, "experiment") and hasattr(
+                            self.trainer.logger.experiment, "add_text"
+                        ):
+                            # tensorboard logging
+                            for j, sample in enumerate(decoded_samples):
+                                self.trainer.logger.experiment.add_text(
+                                    tag=f"samples/class-{i}/{j}",
+                                    text_string=sample,
+                                    global_step=self.global_step,
+                                )
                 else:
                     self.config.sampling.batch_size = 2
                     samples = self.sample()
@@ -876,6 +887,17 @@ class Diffusion(L.LightningModule):
                             columns=["Generated Samples"],
                             data=[[s] for s in decoded_samples],
                         )
+
+                    elif hasattr(self.trainer.logger, "experiment") and hasattr(
+                        self.trainer.logger.experiment, "add_text"
+                    ):
+                        # tensorboard logging
+                        for j, sample in enumerate(decoded_samples):
+                            self.trainer.logger.experiment.add_text(
+                                tag=f"samples/step{self.global_step}",
+                                text_string=sample,
+                                global_step=self.global_step,
+                            )
 
     def _sample_prior(self, *batch_dims):
         if self.diffusion == "absorbing_state":
@@ -938,6 +960,57 @@ class Diffusion(L.LightningModule):
             samples = self._diffusion_sample(
                 classifier_model=classifier_model, cond=cond, eps=eps
             )
+        if not self.config.eval.disable_ema:
+            self._restore_non_ema_params()
+        return samples
+
+    def sample_cond(
+        self, inpainting_inputs, eps=1e-5
+    ):  # Note: differs from self.config.training.sampling_eps
+        """Generate samples from (ema) model.
+
+        Supports both AR and diffusion sampling.
+        Supports:
+          - standard decoding,
+          - classifier-free guidance,
+          - classifier-based guidance
+            - CBG / FUDGE,
+            - NOS / PPLM.
+        """
+        # WARNING: Lightning auto-casting is not working in this method.
+        if not self.config.eval.disable_ema:
+            self.load_ema_params()
+        if getattr(self.config, "guidance", None) is not None:
+            if self.config.guidance.method == "cfg":
+                cond = (
+                    torch.ones(self.config.sampling.batch_size, device=self.device)
+                    * self.config.guidance.condition
+                ).to(torch.long)
+            else:
+                cond = None
+            if (
+                self.parameterization == "ar"
+                and self.config.guidance.method in {"fudge", "pplm"}
+            ) or self.config.guidance.method in {"cbg", "nos"}:
+                classifier_model = classifier.Classifier.load_from_checkpoint(
+                    self.config.guidance.classifier_checkpoint_path,
+                    tokenizer=self.tokenizer,
+                    config=self.config,
+                    logger=False,
+                ).to(self.device)
+                classifier_model.eval()
+            else:
+                classifier_model = None
+        else:
+            classifier_model, cond = None, None
+
+        if self.parameterization == "ar":
+            samples = self._ar_sample(classifier_model=classifier_model, cond=cond)
+        else:  # Diffusion sampling
+            samples = self._diffusion_sample_conditionally(
+                inpainting_inputs, classifier_model=classifier_model, cond=cond, eps=eps
+            )
+
         if not self.config.eval.disable_ema:
             self._restore_non_ema_params()
         return samples
@@ -1256,6 +1329,227 @@ class Diffusion(L.LightningModule):
                 cache = None
             xt = xs
         return xt
+
+    @torch.no_grad()
+    def _diffusion_sample_conditionally(
+        self,
+        inpainting_inputs,
+        classifier_model: typing.Optional[classifier.Classifier] = None,
+        cond: typing.Optional[torch.tensor] = None,
+        eps: float = 1e-5,  # Note: differs from self.config.training.sampling_eps
+    ):
+        xt = inpainting_inputs.to(self.device)
+
+        timesteps = torch.linspace(
+            1, eps, self.config.sampling.steps + 1, device=self.device
+        )
+        dt = (1 - eps) / self.config.sampling.steps
+        pbar = tqdm(range(self.config.sampling.steps), desc="Sampling", leave=False)
+        NFEs = 0
+        cache = None
+
+        for i in pbar:
+            t = timesteps[i]
+            if self.T > 0:  # t in {1/T,..., 1}, to match training
+                t = (t * self.T).to(torch.int)
+                t = t / self.T
+                t += 1 / self.T
+            t = t * torch.ones(xt.shape[0], 1, device=self.device)
+            if cache is None:
+                NFEs += 1
+            sigma_t, _ = self.noise(t)
+            sigma_s, _ = self.noise(t - dt)
+            if sigma_t.ndim > 1:
+                sigma_t = sigma_t.squeeze(-1)
+            if sigma_s.ndim > 1:
+                sigma_s = sigma_s.squeeze(-1)
+            assert sigma_t.ndim == 1, sigma_t.shape
+            assert sigma_s.ndim == 1, sigma_s.shape
+
+            # --- Start of modified logic ---
+            move_chance_t = 1 - torch.exp(-sigma_t)
+            move_chance_s = 1 - torch.exp(-sigma_s)
+
+            # Reshape for broadcasting. This creates a (B, 1, 1) tensor.
+            move_chance_t = move_chance_t[:, None, None]
+            move_chance_s = move_chance_s[:, None, None]
+
+            if self.diffusion == "uniform":
+                eos_flag = (xt == self.tokenizer.eos_token_id).unsqueeze(-1)
+                print(eos_flag)
+                move_chance_s = move_chance_s.expand(-1, xt.shape[1], -1).clone()
+                # print(self.tokenizer.eos_token_id)
+                print(
+                    f"BEFORE: move_t:{move_chance_t[eos_flag].sum()} move_s:{move_chance_s[eos_flag].sum()}"
+                )
+                # Find EOS tokens and create a broadcastable mask.
+
+                # Set move chance to zero for EOS tokens to prevent them from changing.
+                move_chance_t[eos_flag] = 0.0
+                move_chance_s[eos_flag] = 0.0
+                print(
+                    f"AFTER: move_t:{move_chance_t[eos_flag].sum()} move_s:{move_chance_s[eos_flag].sum()}"
+                )
+                print(f"Move_chance_t:{move_chance_t.shape}, xt:{xt.shape}")
+                print(f"Xt:{xt}")
+            assert move_chance_t.ndim == 3, move_chance_t.shape
+
+            if getattr(self.config, "guidance", None) is None:
+                xs, q_xs, cache = self._ddpm_denoise(
+                    xt=xt,
+                    time_conditioning=sigma_t,
+                    move_chance_t=move_chance_t,
+                    move_chance_s=move_chance_s,
+                    cache=cache,
+                )
+            else:
+                # ... (rest of the function remains the same)
+                if self.config.guidance.method == "cfg":
+                    xs, q_xs, cache = self._cfg_denoise(
+                        cond=cond,
+                        gamma=self.config.guidance.gamma,
+                        xt=xt,
+                        time_conditioning=sigma_t,
+                        move_chance_t=move_chance_t,
+                        move_chance_s=move_chance_s,
+                        cache=cache,
+                    )
+                elif self.config.guidance.method == "cbg":
+                    xs, q_xs, cache = self._cbg_denoise(
+                        classifier_model=classifier_model,
+                        conditioning_class=self.config.guidance.condition,
+                        gamma=self.config.guidance.gamma,
+                        use_approx=self.config.guidance.use_approx,
+                        xt=xt,
+                        time_conditioning=sigma_t,
+                        move_chance_t=move_chance_t,
+                        move_chance_s=move_chance_s,
+                        cache=cache,
+                    )
+                elif self.config.guidance.method == "nos":
+                    xs, q_xs, cache = self._nos_denoise(
+                        classifier_model=classifier_model,
+                        conditioning_class=self.config.guidance.condition,
+                        num_nos_steps=self.config.guidance.num_nos_steps,
+                        nos_step_size=self.config.guidance.nos_step_size,
+                        nos_stability_coef=self.config.guidance.nos_stability_coef,
+                        xt=xt,
+                        time_conditioning=sigma_t,
+                        move_chance_t=move_chance_t,
+                        move_chance_s=move_chance_s,
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Guidance method {self.config.guidance.method} not implemented."
+                    )
+            pbar.set_postfix(
+                NFEs=NFEs,
+                prob_check=(q_xs.sum() / xt.numel()).item(),
+                nan_check=bool(q_xs.isnan().sum() > 0),
+            )
+            if not self.config.sampling.use_cache or not torch.allclose(xs, xt):
+                # Disable caching
+                cache = None
+            xt = xs
+        return xt
+
+    # def _diffusion_sample_conditionally(
+    #     self,
+    #     inpainting_inputs,
+    #     classifier_model: typing.Optional[classifier.Classifier] = None,
+    #     cond: typing.Optional[torch.tensor] = None,
+    #     eps: float = 1e-5,  # Note: differs from self.config.training.sampling_eps
+    # ):
+    #     xt = inpainting_inputs.to(self.device)
+    #
+    #     timesteps = torch.linspace(
+    #         1, eps, self.config.sampling.steps + 1, device=self.device
+    #     )
+    #     dt = (1 - eps) / self.config.sampling.steps
+    #     pbar = tqdm(range(self.config.sampling.steps), desc="Sampling", leave=False)
+    #     NFEs = 0
+    #     cache = None
+    #
+    #     for i in pbar:
+    #         t = timesteps[i]
+    #         if self.T > 0:  # t in {1/T,..., 1}, to match training
+    #             t = (t * self.T).to(torch.int)
+    #             t = t / self.T
+    #             t += 1 / self.T
+    #         t = t * torch.ones(xt.shape[0], 1, device=self.device)
+    #         if cache is None:
+    #             NFEs += 1
+    #         sigma_t, _ = self.noise(t)
+    #         sigma_s, _ = self.noise(t - dt)
+    #         if sigma_t.ndim > 1:
+    #             sigma_t = sigma_t.squeeze(-1)
+    #         if sigma_s.ndim > 1:
+    #             sigma_s = sigma_s.squeeze(-1)
+    #         assert sigma_t.ndim == 1, sigma_t.shape
+    #         assert sigma_s.ndim == 1, sigma_s.shape
+    #         move_chance_t = 1 - torch.exp(-sigma_t)
+    #         move_chance_s = 1 - torch.exp(-sigma_s)
+    #         move_chance_t = move_chance_t[:, None, None]
+    #         move_chance_s = move_chance_s[:, None, None]
+    #         assert move_chance_t.ndim == 3, move_chance_t.shape
+    #
+    #         if getattr(self.config, "guidance", None) is None:
+    #             xs, q_xs, cache = self._ddpm_denoise(
+    #                 xt=xt,
+    #                 time_conditioning=sigma_t,
+    #                 move_chance_t=move_chance_t,
+    #                 move_chance_s=move_chance_s,
+    #                 cache=cache,
+    #             )
+    #         else:
+    #             if self.config.guidance.method == "cfg":
+    #                 xs, q_xs, cache = self._cfg_denoise(
+    #                     cond=cond,
+    #                     gamma=self.config.guidance.gamma,
+    #                     xt=xt,
+    #                     time_conditioning=sigma_t,
+    #                     move_chance_t=move_chance_t,
+    #                     move_chance_s=move_chance_s,
+    #                     cache=cache,
+    #                 )
+    #             elif self.config.guidance.method == "cbg":
+    #                 xs, q_xs, cache = self._cbg_denoise(
+    #                     classifier_model=classifier_model,
+    #                     conditioning_class=self.config.guidance.condition,
+    #                     gamma=self.config.guidance.gamma,
+    #                     use_approx=self.config.guidance.use_approx,
+    #                     xt=xt,
+    #                     time_conditioning=sigma_t,
+    #                     move_chance_t=move_chance_t,
+    #                     move_chance_s=move_chance_s,
+    #                     cache=cache,
+    #                 )
+    #             elif self.config.guidance.method == "nos":
+    #                 xs, q_xs, cache = self._nos_denoise(
+    #                     classifier_model=classifier_model,
+    #                     conditioning_class=self.config.guidance.condition,
+    #                     num_nos_steps=self.config.guidance.num_nos_steps,
+    #                     nos_step_size=self.config.guidance.nos_step_size,
+    #                     nos_stability_coef=self.config.guidance.nos_stability_coef,
+    #                     xt=xt,
+    #                     time_conditioning=sigma_t,
+    #                     move_chance_t=move_chance_t,
+    #                     move_chance_s=move_chance_s,
+    #                 )
+    #             else:
+    #                 raise NotImplementedError(
+    #                     f"Guidance method {self.config.guidance.method} not implemented."
+    #                 )
+    #         pbar.set_postfix(
+    #             NFEs=NFEs,
+    #             prob_check=(q_xs.sum() / xt.numel()).item(),
+    #             nan_check=bool(q_xs.isnan().sum() > 0),
+    #         )
+    #         if not self.config.sampling.use_cache or not torch.allclose(xs, xt):
+    #             # Disable caching
+    #             cache = None
+    #         xt = xs
+    #     return xt
 
     def _ddpm_denoise(
         self,

@@ -8,14 +8,16 @@ import typing
 import urllib
 import zipfile
 
-
 import datasets
+from datasets import Dataset
+from Bio import SeqIO
+
 import fsspec
 import numpy as np
 import tokenizers
 import torch
 import transformers
-
+from transformers import GPT2TokenizerFast
 import custom_datasets.discretized_cifar10
 import custom_datasets.ten_species_dataset
 import utils
@@ -45,6 +47,10 @@ def lm1b_detokenizer(x):
     x = x.replace("$ ", "$")
     x = x.replace("£ ", "£")
     return x
+
+
+def acyp_detokenizer(text):
+    return text
 
 
 class Text8Tokenizer(transformers.PreTrainedTokenizer):
@@ -194,6 +200,27 @@ def get_text8_dataset(cache_dir, max_seq_length=256, drop_last=True, crop_train=
     return dataset
 
 
+def get_acyp_dataset(mode="train"):
+    def read_fasta_from_file(filepath):
+        sequence_list = []
+        with open(filepath, "r") as fasta_handle:
+            for record in SeqIO.parse(fasta_handle, "fasta"):
+                sequence_list.append({
+                    "text": str(record.seq),
+                })
+        return sequence_list
+
+    # Use the appropriate file depending on the mode
+    fasta_path = {
+        "train": "/home/dhruva/discrete-diffusion-guidance/custom_datasets/train.fasta",
+        "test": "/home/dhruva/discrete-diffusion-guidance/custom_datasets/val.fasta",
+    }[mode]
+
+    acyp_data = read_fasta_from_file(fasta_path)
+    acyp_dataset = Dataset.from_list(acyp_data)
+
+    return acyp_dataset
+
 def _group_texts(examples, block_size, bos, eos, add_special_tokens=True):
     # Concatenate all texts.
     concatenated_examples = list(itertools.chain(*examples["input_ids"]))
@@ -295,6 +322,8 @@ def get_dataset(
             rc_aug=False,  # TODO: find way to pass this
             add_special_tokens=add_special_tokens,
         )
+    elif dataset_name == "acyp":
+        dataset = get_acyp_dataset(mode=mode)
     else:
         dataset = datasets.load_dataset(
             dataset_name, cache_dir=cache_dir, streaming=streaming
@@ -302,11 +331,19 @@ def get_dataset(
 
     if dataset_name == "qm9":
         data = dataset
+
+    elif dataset_name == "acyp":
+        data = dataset
+
     else:
         data = dataset[mode]
 
     if dataset_name == "lm1b":
         detokenizer = lm1b_detokenizer
+
+    elif dataset_name in ["acyp", "uniref50"]:
+        detokenizer = acyp_detokenizer
+
     else:
         detokenizer = None
 
@@ -420,6 +457,16 @@ def get_tokenizer(config):
             add_mask_token=config.data.add_mask_token,
             add_special_tokens=config.data.add_special_tokens,
         )
+    elif config.data.tokenizer_name_or_path == "acyp":
+        tokenizer = GPT2TokenizerFast(
+            vocab_file="/home/dhruva/discrete-diffusion-guidance/vocab.json",
+            merges_file="/home/dhruva/discrete-diffusion-guidance/merges.txt",
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
+            pad_token="<pad>",
+            mask_token="<mask>",
+        )
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             config.data.tokenizer_name_or_path, trust_remote_code=True
@@ -499,7 +546,14 @@ def get_dataloaders(
                 label_col=label_col,
                 label_threshold=getattr(config.data, "label_col_pctile", None),
             )
-    if config.data.valid in ["text8", "lm1b", "amazon_polarity", "qm9", "ten_species"]:
+    if config.data.valid in [
+        "acyp",
+        "text8",
+        "lm1b",
+        "amazon_polarity",
+        "qm9",
+        "ten_species",
+    ]:
         validation_split = "test"
     else:
         validation_split = "validation"

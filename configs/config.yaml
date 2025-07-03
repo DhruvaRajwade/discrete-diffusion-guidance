@@ -1,7 +1,8 @@
 defaults:
   - _self_
-  - /callbacks: [checkpoint_every_n_steps, checkpoint_monitor, learning_rate_monitor]
-  - /data: lm1b
+  - /callbacks:
+      [checkpoint_every_n_steps, checkpoint_monitor, learning_rate_monitor]
+  - /data: acyp
   - /model: small
   - /strategy: ddp
   - /noise: loglinear
@@ -9,35 +10,35 @@ defaults:
   - /classifier_model: null
   - /guidance: null
 
-mode: train  # train / train_classifier / ppl_eval
-diffusion: absorbing_state
-backbone: dit  # dit / dimamba / ar
+mode: train # train / train_classifier / ppl_eval
+diffusion: uniform #absorbing_state
+backbone: dit # dit / dimamba / ar
 classifier_backbone: null
-parameterization: subs  # subs / d3pm / ar
-time_conditioning: False
+parameterization: d3pm #subs # subs / d3pm / ar
+time_conditioning: True #False #Use for UDLM
 subs_masking: False
-zero_recon_loss: False  # Use for UDLM
-T: 0  # 0 (continuous time) / 1000
+zero_recon_loss: True # Use for UDLM
+T: 0 # 0 (continuous time) / 1000
 
 is_vision: False
 seed: 1
 
 loader:
-  global_batch_size: 512
+  global_batch_size: 32 #32 takes 40.5 GB on the small model variant (time: 2 AM 8 June)
   eval_global_batch_size: ${.global_batch_size}
   # Note: batch_size and eval_batch_size are **per machine**
   batch_size: ${div_up:${.global_batch_size}, ${eval:${trainer.devices} * ${trainer.num_nodes}}}
   eval_batch_size: ${div_up:${.eval_global_batch_size}, ${eval:${trainer.devices} * ${trainer.num_nodes}}}
   num_workers: ${eval:"len(__import__('os').sched_getaffinity(0))"}
-  pin_memory: True
-  persistent_workers: True
+  pin_memory: False #True
+  persistent_workers: False ##True was default
 
 sampling:
   use_cache: True
   steps: 128
   # Note: batch_size is **per machine**
   batch_size: ${loader.eval_batch_size}
-  num_sample_batches: 2  # Total samples: `num_gpus` * `batch_size` * `num_sample_batches`
+  num_sample_batches: 4 # Total samples: `num_gpus` * `batch_size` * `num_sample_batches`
   use_float64: False
 
 training:
@@ -47,16 +48,34 @@ training:
   sampling_eps: 1e-3
   change_of_variables: False
   compute_loss_on_pad_tokens: False
-  use_simple_ce_loss: False  # Ignore ELBO; just use CE
-  guidance: # Can turn off with `training.guidance: null`
-    cond_dropout: 0.0
+  use_simple_ce_loss: False # Ignore ELBO; just use CE
+  guidance: null
+  # guidance: # Can turn off with `training.guidance: null`
+  #   cond_dropout: 0.0
 
 eval:
-  checkpoint_path: ''  # Used to evaluate a checkpoint after training.
+  checkpoint_path: "/data/dhruva/discrete-diffusion-guidance/outputs/2025.06.20/200436/checkpoints/best.ckpt" # Used to evaluate a checkpoint after training.
   disable_ema: False
   generate_samples: True
-  generated_samples_path: ''
+  generated_samples_path: /data/dhruva/discrete-diffusion-guidance/samples_log/ #"${.save_dir}/samples/"
+  use_tensorboard: False
   max_samples: 50_000
+
+# === Sampling Mode ===
+sample:
+  mode: "uncond" # options: "uncond", "inpaint"
+  uncond:
+    seq_length: [60] # Can be a single int or a range
+    num_samples: 900 # Total number of samples to generate
+    sampling_batch_size: 10 # Batch size per sampling step
+
+#   # === Inpainting Sampling Parameters ===
+#   # Uncomment below to use inpainting mode
+#   # inpaint:
+#   prior_1: "MKTLL"             # N-terminal prefix (can be empty string "")
+#   prior_2: "GHHHHH"            # C-terminal suffix (can be empty string "")
+#   mask_len: 20                 # Number of <mask> tokens to fill in
+#   num_samples: 32              # Number of inpainted sequences to generate
 
 optim:
   weight_decay: 0
@@ -72,17 +91,17 @@ trainer:
   devices: ${device_count:}
   accumulate_grad_batches: ${div_up:${loader.global_batch_size}, ${eval:${trainer.devices} * ${loader.batch_size} * ${trainer.num_nodes}}}
   gradient_clip_val: 1.0
-  precision: 'bf16'
+  precision: "bf16-mixed"
   num_sanity_val_steps: 2
   max_steps: 1_000_000
   log_every_n_steps: 10
-  limit_train_batches: 1.0   # train on full dataset, can be used to toggle quick run
-  limit_val_batches: 1.0     # validate on full dataset, can be used to toggle quick run
-  val_check_interval: 10000
+  limit_train_batches: 1.0 # train on full dataset, can be used to toggle quick run
+  limit_val_batches: 1.0 # validate on full dataset, can be used to toggle quick run
+  val_check_interval: 450 #10000
 
 wandb:
   project: discrete-diffusion-guidance
-  notes: Guided Discrete Diffusion
+  notes: UDLM on 101K train, 25K val sequences
   group: null
   job_type: training
   name: null
@@ -94,13 +113,13 @@ wandb:
 
 hydra:
   run:
-    dir: ./outputs/${data.train}/${now:%Y.%m.%d}/${now:%H%M%S}
+    dir: /data/dhruva/discrete-diffusion-guidance/outputs/${now:%Y.%m.%d}/${now:%H%M%S} #./outputs/${now:%Y.%m.%d}/${now:%H%M%S}
   job:
     chdir: true
 
 checkpointing:
   # Use custom `save_dir` if, e.g., saving to S3 bucket, otherwise leave this parameter as is
-  save_dir: ${cwd:}
+  save_dir: ${cwd:} #/data/dhruva/discrete-diffusion-guidance/outputs/${now:%Y.%m.%d}/${now:%H%M%S} #${cwd:}
   # Note: `checkpoints` path should correspond to `checkpoint_every_n_steps.dirpath`
-  resume_from_ckpt: true
+  resume_from_ckpt: True
   resume_ckpt_path: ${.save_dir}/checkpoints/last.ckpt
