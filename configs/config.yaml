@@ -1,15 +1,13 @@
 defaults:
   - _self_
-  - /callbacks:
-      [checkpoint_every_n_steps, checkpoint_monitor, learning_rate_monitor]
+  - /callbacks: [checkpoint_every_n_steps, checkpoint_monitor, learning_rate_monitor]
   - /data: acyp
-  - /model: small
+  - /model: medium
   - /strategy: ddp
   - /noise: loglinear
   - /lr_scheduler: constant_warmup
   - /classifier_model: null
   - /guidance: null
-
 mode: train # train / train_classifier / ppl_eval
 diffusion: uniform #absorbing_state
 backbone: dit # dit / dimamba / ar
@@ -19,12 +17,10 @@ time_conditioning: True #False #Use for UDLM
 subs_masking: False
 zero_recon_loss: True # Use for UDLM
 T: 0 # 0 (continuous time) / 1000
-
 is_vision: False
 seed: 1
-
 loader:
-  global_batch_size: 32 #32 takes 40.5 GB on the small model variant (time: 2 AM 8 June)
+  global_batch_size: 48 #32 takes 40.5 GB on the small model variant (time: 2 AM 8 June)
   eval_global_batch_size: ${.global_batch_size}
   # Note: batch_size and eval_batch_size are **per machine**
   batch_size: ${div_up:${.global_batch_size}, ${eval:${trainer.devices} * ${trainer.num_nodes}}}
@@ -32,7 +28,6 @@ loader:
   num_workers: ${eval:"len(__import__('os').sched_getaffinity(0))"}
   pin_memory: False #True
   persistent_workers: False ##True was default
-
 sampling:
   use_cache: True
   steps: 128
@@ -40,7 +35,6 @@ sampling:
   batch_size: ${loader.eval_batch_size}
   num_sample_batches: 4 # Total samples: `num_gpus` * `batch_size` * `num_sample_batches`
   use_float64: False
-
 training:
   ema: 0.9999
   antithetic_sampling: True
@@ -52,23 +46,20 @@ training:
   guidance: null
   # guidance: # Can turn off with `training.guidance: null`
   #   cond_dropout: 0.0
-
 eval:
-  checkpoint_path: "/data/dhruva/discrete-diffusion-guidance/outputs/2025.06.20/200436/checkpoints/best.ckpt" # Used to evaluate a checkpoint after training.
+  checkpoint_path: /data/dhruva/discrete-diffusion-guidance/outputs/udlm_100k_medium_esm_tok/checkpoints/best.ckpt #path to checkpoint
   disable_ema: False
   generate_samples: True
   generated_samples_path: /data/dhruva/discrete-diffusion-guidance/samples_log/ #"${.save_dir}/samples/"
   use_tensorboard: False
   max_samples: 50_000
-
 # === Sampling Mode ===
 sample:
   mode: "uncond" # options: "uncond", "inpaint"
   uncond:
-    seq_length: [60] # Can be a single int or a range
-    num_samples: 900 # Total number of samples to generate
-    sampling_batch_size: 10 # Batch size per sampling step
-
+    seq_length: [60, 400] #,200] # Can be a single int or a range
+    num_samples: 305000 # Total number of samples to generate
+    sampling_batch_size: 10 #12 # Batch size per sampling step
 #   # === Inpainting Sampling Parameters ===
 #   # Uncomment below to use inpainting mode
 #   # inpaint:
@@ -76,14 +67,12 @@ sample:
 #   prior_2: "GHHHHH"            # C-terminal suffix (can be empty string "")
 #   mask_len: 20                 # Number of <mask> tokens to fill in
 #   num_samples: 32              # Number of inpainted sequences to generate
-
 optim:
   weight_decay: 0
   lr: 3e-4
   beta1: 0.9
   beta2: 0.999
   eps: 1e-8
-
 trainer:
   _target_: lightning.Trainer
   accelerator: cuda
@@ -98,28 +87,26 @@ trainer:
   limit_train_batches: 1.0 # train on full dataset, can be used to toggle quick run
   limit_val_batches: 1.0 # validate on full dataset, can be used to toggle quick run
   val_check_interval: 450 #10000
-
 wandb:
-  project: discrete-diffusion-guidance
+  project: udlm #discrete-diffusion-guidance
   notes: UDLM on 101K train, 25K val sequences
   group: null
   job_type: training
   name: null
-  id: ${.name}_${seed}
+  # Use ID when resuming training from a checkpoint
+  # id: ${.name}_${seed}
   tags:
     - ${noise.type}
     - ${data.train}
     - ${data.valid}
-
 hydra:
   run:
     dir: /data/dhruva/discrete-diffusion-guidance/outputs/${now:%Y.%m.%d}/${now:%H%M%S} #./outputs/${now:%Y.%m.%d}/${now:%H%M%S}
   job:
     chdir: true
-
 checkpointing:
   # Use custom `save_dir` if, e.g., saving to S3 bucket, otherwise leave this parameter as is
-  save_dir: ${cwd:} #/data/dhruva/discrete-diffusion-guidance/outputs/${now:%Y.%m.%d}/${now:%H%M%S} #${cwd:}
+  save_dir: /data/dhruva/discrete-diffusion-guidance/outputs/udlm_100k_medium_esm_tok
   # Note: `checkpoints` path should correspond to `checkpoint_every_n_steps.dirpath`
   resume_from_ckpt: True
   resume_ckpt_path: ${.save_dir}/checkpoints/last.ckpt

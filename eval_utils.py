@@ -5,6 +5,7 @@ import transformers
 from tqdm import tqdm
 
 import diffusion
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 def compute_ppl(pretrained_model, val_ds):
@@ -79,3 +80,60 @@ def compute_generative_ppl(
             #   nlls, first_eos[..., 1:] + token_mask[..., 1:])
             gen_ppl_metric.update(nlls, attn_mask_chunk[..., 1:])
     return gen_ppl_metric.compute().item()
+
+
+def compute_esm_ppl(val_ds, model_name="facebook/esm2_t6_8M_UR50D", max_length=1024):
+    """
+    Compute perplexity of validation dataset using ESM-2 6M model.
+    val_ds: iterable of dicts with "input_ids" or raw protein sequences
+    """
+    # Load ESM tokenizer + model
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda").eval()
+
+    ppl_metric = diffusion.Perplexity().to("cuda")
+
+    pbar = tqdm(val_ds, desc="ESM PPL")
+    for batch in pbar:
+        # If val_ds already has tokenized inputs
+        if "input_ids" in batch:
+            input_ids = batch["input_ids"].to("cuda")
+            attention_mask = batch.get("attention_mask", None)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to("cuda")
+        else:
+            # Otherwise assume raw sequences
+            enc = tokenizer(
+                batch["sequence"],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+            )
+            input_ids = enc["input_ids"].to("cuda")
+            attention_mask = enc["attention_mask"].to("cuda")
+
+        # Forward pass
+        with torch.no_grad():
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits.transpose(-1, -2)
+
+            # Compute NLL (per token)
+            nlls = torch.nn.functional.cross_entropy(
+                logits[..., :-1], input_ids[..., 1:], reduction="none"
+            )
+
+        # Mask padding tokens
+        if attention_mask is not None:
+            token_mask = attention_mask[..., 1:]
+        else:
+            token_mask = torch.ones_like(input_ids[..., 1:])
+
+        ppl_metric.update(nlls, token_mask)
+
+        pbar.set_postfix({"esm_ppl": ppl_metric.compute().item()})
+
+        return ppl_metric.compute().item()

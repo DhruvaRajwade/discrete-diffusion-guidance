@@ -11,6 +11,7 @@ from pathlib import Path
 from random import randint
 import dataloader
 import diffusion
+import numpy as np
 
 omegaconf.OmegaConf.register_new_resolver("cwd", os.getcwd)
 omegaconf.OmegaConf.register_new_resolver("device_count", torch.cuda.device_count)
@@ -91,30 +92,34 @@ def run_unconditional_sampling(config, logger, tokenizer, tb_logger):
     )
     model.eval()
 
-    sep_token = tokenizer.eos_token
-    mask_token = tokenizer.mask_token
-    assert mask_token is not None, "Tokenizer must define a mask token"
-
-    seq_length_list = config.sample.uncond.seq_length
+    vocab_size = tokenizer.vocab_size
     num_samples = config.sample.uncond.num_samples
+    seq_length_list = config.sample.uncond.seq_length
+    device = model.device
 
+    # Handle variable lengths
     if len(seq_length_list) == 1:
         sampled_lengths = [seq_length_list[0]] * num_samples
     else:
         sampled_lengths = [
-            randint(min(seq_length_list), max(seq_length_list))
+            np.random.randint(min(seq_length_list), max(seq_length_list) + 1)
             for _ in range(num_samples)
         ]
 
+    # --- 1. Uniform initialization ---
+    cls_id = tokenizer.convert_tokens_to_ids("<cls>")
+    special_ids = set(tokenizer.all_special_ids)
+    usable_vocab = [i for i in range(vocab_size) if i not in special_ids]
+
     full_token_ids = []
     for slen in sampled_lengths:
-        masked_str = f"{sep_token}{mask_token * slen}{sep_token}"
-        # print(masked_str)
-        input_ids = tokenizer.encode(masked_str, return_tensors="pt").squeeze(0)[1:-1]
-        # BUG: </s> and <s> being added at start and end fucking weird
-        # print(tokenizer.decode(input_ids))
-        # print(input_ids)
-        full_token_ids.append(input_ids)
+        init_tokens = torch.tensor(
+            np.random.choice(usable_vocab, size=slen, replace=True),
+            dtype=torch.long,
+        )
+        # prepend <cls> so each sequence starts correctly
+        init_tokens = torch.cat([torch.tensor([cls_id]), init_tokens])
+        full_token_ids.append(init_tokens)
 
     full_token_ids = torch.cat(full_token_ids, dim=0)
     chunks = full_token_ids.split(config.model.length, dim=0)
@@ -126,24 +131,25 @@ def run_unconditional_sampling(config, logger, tokenizer, tb_logger):
     sampling_batch_size = config.sample.uncond.sampling_batch_size
     text_samples = []
 
+    # --- 2. Reverse diffusion sampling ---
     for i in range(0, len(chunks), sampling_batch_size):
         batch_chunks = chunks[i : i + sampling_batch_size]
-        batch_tensor = torch.stack(batch_chunks).to(model.device)
+        batch_tensor = torch.stack(batch_chunks).to(device)
         samples = model.sample_cond(batch_tensor)
-        decoded = tokenizer.batch_decode(samples)
+        decoded = tokenizer.batch_decode(samples, skip_special_tokens=False)
         text_samples.extend(decoded)
 
-    if tb_logger is not None:
-        tb_logger.experiment.add_text("Samples", "\n\n".join(text_samples))
+    # --- 3. Extract <cls>-bounded sequences ---
+    raw_text = " ".join(text_samples).strip()
+    segments = raw_text.split("<cls>")
 
-    cleaned_text = re.sub(r"[\s,\[\]']+", " ", "\n".join(text_samples)).strip()
-    sequences = [
-        seq.strip() for seq in re.findall(r"</s>(.*?)</s>", cleaned_text) if seq.strip()
-    ]
+    sequences = ["".join(seg.split()) for seg in segments if seg.strip()]
 
+    # --- 4. Save to FASTA ---
     out_path = Path(
-        f"/home/dhruva/discrete-diffusion-guidance/samples/uncond_len_{'-'.join(map(str, seq_length_list))}_num_{num_samples}.fasta"
-    )
+        f"~/discrete-diffusion-guidance/samples/"
+        f"esm_med_udlm_uncond_len_{'-'.join(map(str, seq_length_list))}_num_{num_samples}.fasta"
+    ).expanduser()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(out_path, "w") as f:
@@ -151,7 +157,89 @@ def run_unconditional_sampling(config, logger, tokenizer, tb_logger):
             if len(seq) > min(sampled_lengths) - 10:
                 f.write(f">seq_{i}\n{seq}\n")
 
+    logger.info(f"Saved {len(sequences)} sequences to {out_path}")
     print("Unconditional samples:", sequences)
+
+
+##OG MASKING TOKENS FILLER CODE
+# def run_unconditional_sampling(config, logger, tokenizer, tb_logger):
+#     logger.info("Running unconditional sampling...")
+#     model = diffusion.Diffusion.load_from_checkpoint(
+#         config.eval.checkpoint_path, tokenizer=tokenizer, config=config, logger=False
+#     )
+#     model.eval()
+#
+#     sep_token = tokenizer.eos_token
+#     mask_token = tokenizer.mask_token
+#     assert mask_token is not None, "Tokenizer must define a mask token"
+#
+#     seq_length_list = config.sample.uncond.seq_length
+#     num_samples = config.sample.uncond.num_samples
+#
+#     if len(seq_length_list) == 1:
+#         sampled_lengths = [seq_length_list[0]] * num_samples
+#     else:
+#         sampled_lengths = [
+#             randint(min(seq_length_list), max(seq_length_list))
+#             for _ in range(num_samples)
+#         ]
+#
+#     full_token_ids = []
+#     for slen in sampled_lengths:
+#         masked_str = f"{sep_token}{mask_token * slen}{sep_token}"
+#         # print(masked_str)
+#         input_ids = tokenizer.encode(masked_str, return_tensors="pt").squeeze(0)[1:-1]
+#         # BUG: </s> and <s> being added at start and end fucking weird
+#         # print(tokenizer.decode(input_ids))
+#         # print(input_ids)
+#         full_token_ids.append(input_ids)
+#
+#     full_token_ids = torch.cat(full_token_ids, dim=0)
+#     chunks = full_token_ids.split(config.model.length, dim=0)
+#
+#     if chunks[-1].size(0) < config.model.length:
+#         chunks = chunks[:-1]
+#
+#     logger.info(f"Total chunks to sample from: {len(chunks)}")
+#     sampling_batch_size = config.sample.uncond.sampling_batch_size
+#     text_samples = []
+#
+#     for i in range(0, len(chunks), sampling_batch_size):
+#         batch_chunks = chunks[i : i + sampling_batch_size]
+#         batch_tensor = torch.stack(batch_chunks).to(model.device)
+#         samples = model.sample_cond(batch_tensor)
+#         decoded = tokenizer.batch_decode(samples)
+#         text_samples.extend(decoded)
+#
+#     # print(text_samples)
+#     # return
+#     if tb_logger is not None:
+#         tb_logger.experiment.add_text("Samples", "\n\n".join(text_samples))
+#
+#     ### This is for the GPT2 style tokenization
+#     # cleaned_text = re.sub(r"[\s,\[\]']+", " ", "\n".join(text_samples)).strip()
+#     # sequences = [
+#     #     seq.strip() for seq in re.findall(r"</s>(.*?)</s>", cleaned_text) if seq.strip()
+#     # ]
+#
+#     # NOTE: This is for ESM style tokenization Extract sequences between <cls> markers
+#     sequences = [
+#         "".join(seq.split())
+#         for seq in re.findall(r"<cls>(.*?)(?=<cls>|$)", " ".join(text_samples).strip())
+#         if seq.strip()
+#     ]
+#     # NOTE: Path rn is specific to UDLM med ESM tok, change it before usage
+#     out_path = Path(
+#         f"/home/dhruva/discrete-diffusion-guidance/samples/esm_med_udlm_uncond_len_{'-'.join(map(str, seq_length_list))}_num_{num_samples}.fasta"
+#     )
+#     out_path.parent.mkdir(parents=True, exist_ok=True)
+#
+#     with open(out_path, "w") as f:
+#         for i, seq in enumerate(sequences):
+#             if len(seq) > min(sampled_lengths) - 10:
+#                 f.write(f">seq_{i}\n{seq}\n")
+#
+#     print("Unconditional samples:", sequences)
 
 
 def run_inpainting_sampling(config, logger, tokenizer, tb_logger):

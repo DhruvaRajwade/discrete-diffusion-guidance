@@ -1453,103 +1453,103 @@ class Diffusion(L.LightningModule):
             xt = xs
         return xt
 
-    # def _diffusion_sample_conditionally(
-    #     self,
-    #     inpainting_inputs,
-    #     classifier_model: typing.Optional[classifier.Classifier] = None,
-    #     cond: typing.Optional[torch.tensor] = None,
-    #     eps: float = 1e-5,  # Note: differs from self.config.training.sampling_eps
-    # ):
-    #     xt = inpainting_inputs.to(self.device)
-    #
-    #     timesteps = torch.linspace(
-    #         1, eps, self.config.sampling.steps + 1, device=self.device
-    #     )
-    #     dt = (1 - eps) / self.config.sampling.steps
-    #     pbar = tqdm(range(self.config.sampling.steps), desc="Sampling", leave=False)
-    #     NFEs = 0
-    #     cache = None
-    #
-    #     for i in pbar:
-    #         t = timesteps[i]
-    #         if self.T > 0:  # t in {1/T,..., 1}, to match training
-    #             t = (t * self.T).to(torch.int)
-    #             t = t / self.T
-    #             t += 1 / self.T
-    #         t = t * torch.ones(xt.shape[0], 1, device=self.device)
-    #         if cache is None:
-    #             NFEs += 1
-    #         sigma_t, _ = self.noise(t)
-    #         sigma_s, _ = self.noise(t - dt)
-    #         if sigma_t.ndim > 1:
-    #             sigma_t = sigma_t.squeeze(-1)
-    #         if sigma_s.ndim > 1:
-    #             sigma_s = sigma_s.squeeze(-1)
-    #         assert sigma_t.ndim == 1, sigma_t.shape
-    #         assert sigma_s.ndim == 1, sigma_s.shape
-    #         move_chance_t = 1 - torch.exp(-sigma_t)
-    #         move_chance_s = 1 - torch.exp(-sigma_s)
-    #         move_chance_t = move_chance_t[:, None, None]
-    #         move_chance_s = move_chance_s[:, None, None]
-    #         assert move_chance_t.ndim == 3, move_chance_t.shape
-    #
-    #         if getattr(self.config, "guidance", None) is None:
-    #             xs, q_xs, cache = self._ddpm_denoise(
-    #                 xt=xt,
-    #                 time_conditioning=sigma_t,
-    #                 move_chance_t=move_chance_t,
-    #                 move_chance_s=move_chance_s,
-    #                 cache=cache,
-    #             )
-    #         else:
-    #             if self.config.guidance.method == "cfg":
-    #                 xs, q_xs, cache = self._cfg_denoise(
-    #                     cond=cond,
-    #                     gamma=self.config.guidance.gamma,
-    #                     xt=xt,
-    #                     time_conditioning=sigma_t,
-    #                     move_chance_t=move_chance_t,
-    #                     move_chance_s=move_chance_s,
-    #                     cache=cache,
-    #                 )
-    #             elif self.config.guidance.method == "cbg":
-    #                 xs, q_xs, cache = self._cbg_denoise(
-    #                     classifier_model=classifier_model,
-    #                     conditioning_class=self.config.guidance.condition,
-    #                     gamma=self.config.guidance.gamma,
-    #                     use_approx=self.config.guidance.use_approx,
-    #                     xt=xt,
-    #                     time_conditioning=sigma_t,
-    #                     move_chance_t=move_chance_t,
-    #                     move_chance_s=move_chance_s,
-    #                     cache=cache,
-    #                 )
-    #             elif self.config.guidance.method == "nos":
-    #                 xs, q_xs, cache = self._nos_denoise(
-    #                     classifier_model=classifier_model,
-    #                     conditioning_class=self.config.guidance.condition,
-    #                     num_nos_steps=self.config.guidance.num_nos_steps,
-    #                     nos_step_size=self.config.guidance.nos_step_size,
-    #                     nos_stability_coef=self.config.guidance.nos_stability_coef,
-    #                     xt=xt,
-    #                     time_conditioning=sigma_t,
-    #                     move_chance_t=move_chance_t,
-    #                     move_chance_s=move_chance_s,
-    #                 )
-    #             else:
-    #                 raise NotImplementedError(
-    #                     f"Guidance method {self.config.guidance.method} not implemented."
-    #                 )
-    #         pbar.set_postfix(
-    #             NFEs=NFEs,
-    #             prob_check=(q_xs.sum() / xt.numel()).item(),
-    #             nan_check=bool(q_xs.isnan().sum() > 0),
-    #         )
-    #         if not self.config.sampling.use_cache or not torch.allclose(xs, xt):
-    #             # Disable caching
-    #             cache = None
-    #         xt = xs
-    #     return xt
+    def _diffusion_sample_conditionally(
+        self,
+        inpainting_inputs,
+        classifier_model: typing.Optional[classifier.Classifier] = None,
+        cond: typing.Optional[torch.tensor] = None,
+        eps: float = 1e-5,  # Note: differs from self.config.training.sampling_eps
+    ):
+        xt = inpainting_inputs.to(self.device)
+
+        timesteps = torch.linspace(
+            1, eps, self.config.sampling.steps + 1, device=self.device
+        )
+        dt = (1 - eps) / self.config.sampling.steps
+        pbar = tqdm(range(self.config.sampling.steps), desc="Sampling", leave=False)
+        NFEs = 0
+        cache = None
+
+        for i in pbar:
+            t = timesteps[i]
+            if self.T > 0:  # t in {1/T,..., 1}, to match training
+                t = (t * self.T).to(torch.int)
+                t = t / self.T
+                t += 1 / self.T
+            t = t * torch.ones(xt.shape[0], 1, device=self.device)
+            if cache is None:
+                NFEs += 1
+            sigma_t, _ = self.noise(t)
+            sigma_s, _ = self.noise(t - dt)
+            if sigma_t.ndim > 1:
+                sigma_t = sigma_t.squeeze(-1)
+            if sigma_s.ndim > 1:
+                sigma_s = sigma_s.squeeze(-1)
+            assert sigma_t.ndim == 1, sigma_t.shape
+            assert sigma_s.ndim == 1, sigma_s.shape
+            move_chance_t = 1 - torch.exp(-sigma_t)
+            move_chance_s = 1 - torch.exp(-sigma_s)
+            move_chance_t = move_chance_t[:, None, None]
+            move_chance_s = move_chance_s[:, None, None]
+            assert move_chance_t.ndim == 3, move_chance_t.shape
+
+            if getattr(self.config, "guidance", None) is None:
+                xs, q_xs, cache = self._ddpm_denoise(
+                    xt=xt,
+                    time_conditioning=sigma_t,
+                    move_chance_t=move_chance_t,
+                    move_chance_s=move_chance_s,
+                    cache=cache,
+                )
+            else:
+                if self.config.guidance.method == "cfg":
+                    xs, q_xs, cache = self._cfg_denoise(
+                        cond=cond,
+                        gamma=self.config.guidance.gamma,
+                        xt=xt,
+                        time_conditioning=sigma_t,
+                        move_chance_t=move_chance_t,
+                        move_chance_s=move_chance_s,
+                        cache=cache,
+                    )
+                elif self.config.guidance.method == "cbg":
+                    xs, q_xs, cache = self._cbg_denoise(
+                        classifier_model=classifier_model,
+                        conditioning_class=self.config.guidance.condition,
+                        gamma=self.config.guidance.gamma,
+                        use_approx=self.config.guidance.use_approx,
+                        xt=xt,
+                        time_conditioning=sigma_t,
+                        move_chance_t=move_chance_t,
+                        move_chance_s=move_chance_s,
+                        cache=cache,
+                    )
+                elif self.config.guidance.method == "nos":
+                    xs, q_xs, cache = self._nos_denoise(
+                        classifier_model=classifier_model,
+                        conditioning_class=self.config.guidance.condition,
+                        num_nos_steps=self.config.guidance.num_nos_steps,
+                        nos_step_size=self.config.guidance.nos_step_size,
+                        nos_stability_coef=self.config.guidance.nos_stability_coef,
+                        xt=xt,
+                        time_conditioning=sigma_t,
+                        move_chance_t=move_chance_t,
+                        move_chance_s=move_chance_s,
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Guidance method {self.config.guidance.method} not implemented."
+                    )
+            pbar.set_postfix(
+                NFEs=NFEs,
+                prob_check=(q_xs.sum() / xt.numel()).item(),
+                nan_check=bool(q_xs.isnan().sum() > 0),
+            )
+            if not self.config.sampling.use_cache or not torch.allclose(xs, xt):
+                # Disable caching
+                cache = None
+            xt = xs
+        return xt
 
     def _ddpm_denoise(
         self,

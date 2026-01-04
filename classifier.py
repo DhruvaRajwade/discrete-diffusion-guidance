@@ -11,6 +11,8 @@ import transformers
 import dataloader
 import models.dit
 import noise_schedule
+from Seq2Contact.utils.seq2contact import Seq2Contact
+from Seq2Contact.utils.encoders import ESMModel, CaduceusModel
 
 
 class MicroAveragingMetric(torchmetrics.Metric):
@@ -173,14 +175,25 @@ class Classifier(L.LightningModule):
                 n_layer=config.classifier_model.n_layer,
                 trust_remote_code=True,
             )
-            self.classifier_model = (
-                transformers.AutoModelForSequenceClassification.from_config(
-                    hyena_config,
-                    pretrained=False,
-                    num_labels=config.data.num_classes,
-                    problem_type="single_label_classification",
-                    trust_remote_code=True,
-                )
+
+        elif config.classifier_backbone == "seq2contact":
+            protein_model = ESMModel(
+                model_name=config.seq2contact.protein_model_name,
+                unfreeze_last_n_layers=0,
+            )
+
+            na_model = CaduceusModel(
+                model_name=config.seq2contact.dna_model_name, unfreeze_last_n_layers=0
+            )
+
+            self.classifier_model = Seq2Contact(
+                protein_model,
+                na_model,
+                d_model_prot=protein_model.embedding_dim,
+                d_model_na=na_model.embedding_dim,
+                d_k=config.seq2contact.d_k,
+                train_protein_model=False,
+                train_na_model=False,
             )
         else:
             raise NotImplementedError(
@@ -329,9 +342,51 @@ class Classifier(L.LightningModule):
         else:
             sigma = self._process_sigma(sigma) if sigma is not None else sigma
             with torch.cuda.amp.autocast(dtype=torch.float32):
-                logits = self.classifier_model(
-                    x, sigma, x_emb=x_emb, attention_mask=attention_mask
-                )
+                if self.config.classifier_backbone == "seq2contact":
+                    protein_seqs = self.tokenizer.batch_decode(
+                        x, skip_special_tokens=True
+                    )
+                    batch_size = len(protein_seqs)
+
+                    dna_seq = self.config.seq2contact.target_dna
+                    na_seqs = [dna_seq] * batch_size
+
+                    prot_lens = [len(s) for s in protein_seqs]
+                    na_lens = [len(s) for s in na_seqs]
+                    dummy_contacts = [
+                        torch.zeros(pl, nl) for pl, nl in zip(prot_lens, na_lens)
+                    ]
+
+                    (
+                        padded_prot,
+                        padded_na,
+                        _,
+                    ) = self.classifier_model.encode_sequences(
+                        protein_seqs, na_seqs, dummy_contacts, prot_lens, na_lens
+                    )
+
+                    padded_prot = padded_prot.to(x.device)
+                    padded_na = padded_na.to(x.device)
+
+                    _, attention_scores = self.classifier_model.binding_model(
+                        padded_prot, padded_na
+                    )
+
+                    scores = torch.sigmoid(attention_scores).sum(dim=[1, 2])
+
+                    if self.config.data.num_classes == 2:
+                        logits = torch.stack(
+                            [torch.zeros_like(scores), scores], dim=-1
+                        )
+                    else:
+                        raise NotImplementedError(
+                            "Seq2Contact classifier currently only supports binary "
+                            "classification."
+                        )
+                else:
+                    logits = self.classifier_model(
+                        x, sigma, x_emb=x_emb, attention_mask=attention_mask
+                    )
         return logits
 
     def get_log_probs(self, x, sigma, x_emb=None):

@@ -21,6 +21,7 @@ from transformers import GPT2TokenizerFast
 import custom_datasets.discretized_cifar10
 import custom_datasets.ten_species_dataset
 import utils
+from transformers import AutoTokenizer
 
 LOGGER = utils.get_logger(__name__)
 
@@ -51,6 +52,26 @@ def lm1b_detokenizer(x):
 
 def acyp_detokenizer(text):
     return text
+
+
+def esm_detokenizer(tokens):
+    """
+    Convert a list of ESM tokens into a protein sequence string.
+    Removes special tokens like <cls>, <eos>, <pad>, <unk>.
+    """
+    special_tokens = {"<cls>", "<eos>", "<pad>", "<unk>"}
+    seq = "".join([tok.strip() for tok in tokens if tok.strip() not in special_tokens])
+    return seq
+
+
+# def esm_detokenizer(tokens):
+#     """
+#     Convert a list of ESM tokens into a protein sequence string.
+#     Removes special tokens like <cls>, <eos>, <pad>, <unk>.
+#     """
+#     special_tokens = {"<cls>", "<eos>", "<pad>", "<unk>"}
+#     seq = "".join([tok for tok in tokens if tok not in special_tokens])
+#     return seq
 
 
 class Text8Tokenizer(transformers.PreTrainedTokenizer):
@@ -200,14 +221,17 @@ def get_text8_dataset(cache_dir, max_seq_length=256, drop_last=True, crop_train=
     return dataset
 
 
+##This will work for ESM as well
 def get_acyp_dataset(mode="train"):
     def read_fasta_from_file(filepath):
         sequence_list = []
         with open(filepath, "r") as fasta_handle:
             for record in SeqIO.parse(fasta_handle, "fasta"):
-                sequence_list.append({
-                    "text": str(record.seq),
-                })
+                sequence_list.append(
+                    {
+                        "text": str(record.seq),
+                    }
+                )
         return sequence_list
 
     # Use the appropriate file depending on the mode
@@ -220,6 +244,7 @@ def get_acyp_dataset(mode="train"):
     acyp_dataset = Dataset.from_list(acyp_data)
 
     return acyp_dataset
+
 
 def _group_texts(examples, block_size, bos, eos, add_special_tokens=True):
     # Concatenate all texts.
@@ -322,8 +347,10 @@ def get_dataset(
             rc_aug=False,  # TODO: find way to pass this
             add_special_tokens=add_special_tokens,
         )
+    # This works for ESM as well
     elif dataset_name == "acyp":
         dataset = get_acyp_dataset(mode=mode)
+
     else:
         dataset = datasets.load_dataset(
             dataset_name, cache_dir=cache_dir, streaming=streaming
@@ -343,6 +370,7 @@ def get_dataset(
 
     elif dataset_name in ["acyp", "uniref50"]:
         detokenizer = acyp_detokenizer
+        # detokenizer = esm_detokenizer
 
     else:
         detokenizer = None
@@ -467,6 +495,10 @@ def get_tokenizer(config):
             pad_token="<pad>",
             mask_token="<mask>",
         )
+
+    elif config.data.tokenizer_name_or_path == "esm":
+        tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
+
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             config.data.tokenizer_name_or_path, trust_remote_code=True
@@ -553,6 +585,7 @@ def get_dataloaders(
         "amazon_polarity",
         "qm9",
         "ten_species",
+        "esm",
     ]:
         validation_split = "test"
     else:
